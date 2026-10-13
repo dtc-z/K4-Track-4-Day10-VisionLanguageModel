@@ -23,7 +23,7 @@ Nếu `git commit` báo không có gì để commit thì kiểm tra `git status`
    `https://github.com/dtc-z/K4-Track-4-Day10-VisionLanguageModel/blob/main/lab_day10.ipynb`
 
 3. Mở **Notebook Settings**. Bật **Internet** và chọn **GPU** làm Accelerator. Nếu giao diện cho chọn loại GPU, T4 là lựa chọn phù hợp; notebook dùng GPU 0. Kaggle có thể cấp T4 x2 hoặc phần cứng khác tuỳ quota.
-4. Mở tab **Add Input**. Tìm dataset **Road Damage Dataset - Potholes, Cracks and Manholes** của `lorenzoarcioni`, rồi bấm **Add**.
+4. Mở **Add Input** và chọn tab **Datasets** (không chọn **Notebooks/Code**). Mở trực tiếp dataset [Road Damage Dataset: Potholes, Cracks and Manholes](https://www.kaggle.com/datasets/lorenzoarcioni/road-damage-dataset-potholes-cracks-and-manholes) của `lorenzoarcioni`, rồi bấm **Add**. Tên **Road Damage Dataset EDA** là notebook phân tích; đó không phải dataset cần gắn.
 5. Bảo đảm Input có đúng một dataset chứa cả hai thư mục `images/` và `labels-YOLO/`. Notebook tự tìm các thư mục này bên dưới `/kaggle/input`.
 
 Kaggle hỗ trợ nhập notebook từ GitHub/URL và cấu hình Internet, accelerator, cùng nguồn dữ liệu trong Notebook Editor. Xem [Kaggle Notebooks](https://www.kaggle.com/docs/notebooks) nếu tên menu trên giao diện của bạn khác.

@@ -293,10 +293,21 @@ def train_sft(
             param.data = param.data.float()
             param.requires_grad = True
 
+    # GradScaler.unscale_ rejects FP16 gradients on optimizer parameters.
+    # Keep all trainable/master weights in FP32 while autocast handles the
+    # forward pass in FP16. This also covers LoRA/projector dtypes that vary
+    # between PEFT and Transformers versions.
+    for param in model.parameters():
+        if param.requires_grad and param.dtype != torch.float32:
+            param.data = param.data.float()
+
     trainable = [param for param in model.parameters() if param.requires_grad]
     trainable_params = sum(param.numel() for param in trainable)
+    trainable_dtypes = {str(dtype): sum(p.numel() for p in trainable if p.dtype == dtype)
+                        for dtype in {p.dtype for p in trainable}}
     model.print_trainable_parameters()
     print(f"{setup}: LoRA target modules={len(targets)}, trainable params={trainable_params:,}")
+    print(f"{setup}: trainable parameter dtypes={trainable_dtypes}")
 
     dataset = RoadDamageDataset(train_rows, image_root)
     loader = DataLoader(
