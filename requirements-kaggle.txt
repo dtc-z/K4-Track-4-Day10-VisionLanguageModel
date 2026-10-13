@@ -1,0 +1,9 @@
+# Kaggle image supplies CUDA-enabled torch/torchvision; keep those versions intact.
+transformers==5.19.0
+peft==0.21.2
+trl==1.9.2
+accelerate==1.15.0
+bitsandbytes==0.50.2
+datasets
+pyyaml
+pillow
