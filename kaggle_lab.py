@@ -232,17 +232,26 @@ def _projector_parameters(model: Any) -> dict[str, torch.nn.Parameter]:
     }
 
 
-def _promote_fp16_optimizer_grads(model: Any, optimizer: torch.optim.Optimizer) -> list[str]:
-    """Promote scaled FP16 grads before GradScaler unscales optimizer params."""
-    names = {id(param): name for name, param in model.named_parameters()}
-    promoted = []
-    for group in optimizer.param_groups:
-        for param in group["params"]:
-            grad = param.grad
-            if grad is not None and grad.dtype == torch.float16:
-                param.grad = grad.float()
-                promoted.append(names.get(id(param), "<unnamed parameter>"))
-    return promoted
+def _prepare_trainable_parameters(model: Any) -> list[torch.nn.Parameter]:
+    """Use FP32 optimizer weights and FP32 accumulated gradients for AMP."""
+    trainable = []
+    for param in model.parameters():
+        if not param.requires_grad:
+            continue
+        if param.dtype != torch.float32:
+            param.data = param.data.float()
+        # Recent PyTorch builds let a Tensor's accumulated gradient dtype differ
+        # from its parameter dtype. QLoRA/AMP can leave this at FP16 even after
+        # converting the parameter, which makes GradScaler.unscale_ fail.
+        if hasattr(param, "grad_dtype"):
+            param.grad_dtype = torch.float32
+            if param.grad_dtype != torch.float32:
+                raise RuntimeError(
+                    f"Could not set FP32 gradient accumulation for trainable parameter: "
+                    f"grad_dtype={param.grad_dtype}"
+                )
+        trainable.append(param)
+    return trainable
 
 
 def _save_run(model: Any, output_dir: Path, setup: str, step: int | None = None) -> None:
@@ -306,23 +315,23 @@ def train_sft(
             param.data = param.data.float()
             param.requires_grad = True
 
-    # GradScaler.unscale_ rejects FP16 gradients on optimizer parameters.
-    # Keep all trainable/master weights in FP32 while autocast handles the
-    # forward pass in FP16. This also covers LoRA/projector dtypes that vary
-    # between PEFT and Transformers versions.
-    for param in model.parameters():
-        if param.requires_grad and param.dtype != torch.float32:
-            param.data = param.data.float()
-
-    trainable = [param for param in model.parameters() if param.requires_grad]
+    # FP32 parameters alone are insufficient on recent PyTorch: explicitly set
+    # grad_dtype too, before any forward/backward pass.
+    trainable = _prepare_trainable_parameters(model)
     trainable_params = sum(param.numel() for param in trainable)
-    trainable_dtypes = {str(dtype): sum(p.numel() for p in trainable if p.dtype == dtype)
-                        for dtype in {p.dtype for p in trainable}}
+    trainable_dtypes: dict[str, int] = {}
+    trainable_grad_dtypes: dict[str, int] = {}
+    for param in trainable:
+        dtype = str(param.dtype)
+        grad_dtype = str(getattr(param, "grad_dtype", param.dtype))
+        trainable_dtypes[dtype] = trainable_dtypes.get(dtype, 0) + param.numel()
+        trainable_grad_dtypes[grad_dtype] = trainable_grad_dtypes.get(grad_dtype, 0) + param.numel()
     # PEFT reports logical counts for packed Params4bit; this raw count is the
     # exact number of elements passed to AdamW and can therefore differ.
     model.print_trainable_parameters()
     print(f"{setup}: LoRA target modules={len(targets)}, optimizer raw params={trainable_params:,}")
     print(f"{setup}: trainable parameter dtypes={trainable_dtypes}")
+    print(f"{setup}: trainable gradient dtypes={trainable_grad_dtypes}")
 
     dataset = RoadDamageDataset(train_rows, image_root)
     loader = DataLoader(
@@ -350,6 +359,7 @@ def train_sft(
     scaler = torch.amp.GradScaler("cuda", enabled=True)
     model.train()
     optimizer.zero_grad(set_to_none=True)
+    optimizer_param_ids = {id(param) for group in optimizer.param_groups for param in group["params"]}
     torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     step = 0
@@ -367,11 +377,18 @@ def train_sft(
             scaler.scale(loss / grad_accum).backward()
             micro_step += 1
             if micro_step % grad_accum == 0:
-                promoted = _promote_fp16_optimizer_grads(model, optimizer)
-                if promoted and step == 0:
-                    print(
-                        f"{setup}: converted {len(promoted)} FP16 optimizer gradients to FP32 "
-                        f"before unscale; examples={promoted[:5]}"
+                bad_grad_names = [
+                    (name, str(param.grad.dtype))
+                    for name, param in model.named_parameters()
+                    if param.grad is not None
+                    and param.grad.dtype != torch.float32
+                    and id(param) in optimizer_param_ids
+                ]
+                if bad_grad_names:
+                    raise RuntimeError(
+                        f"{setup}: optimizer gradients must be FP32 before GradScaler.unscale_; "
+                        f"found {len(bad_grad_names)} with other dtypes. "
+                        f"Examples (parameter, gradient dtype)={bad_grad_names[:5]}"
                     )
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(trainable, 1.0)
