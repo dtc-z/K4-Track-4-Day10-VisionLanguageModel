@@ -232,6 +232,19 @@ def _projector_parameters(model: Any) -> dict[str, torch.nn.Parameter]:
     }
 
 
+def _promote_fp16_optimizer_grads(model: Any, optimizer: torch.optim.Optimizer) -> list[str]:
+    """Promote scaled FP16 grads before GradScaler unscales optimizer params."""
+    names = {id(param): name for name, param in model.named_parameters()}
+    promoted = []
+    for group in optimizer.param_groups:
+        for param in group["params"]:
+            grad = param.grad
+            if grad is not None and grad.dtype == torch.float16:
+                param.grad = grad.float()
+                promoted.append(names.get(id(param), "<unnamed parameter>"))
+    return promoted
+
+
 def _save_run(model: Any, output_dir: Path, setup: str, step: int | None = None) -> None:
     suffix = f"step_{step:04d}" if step is not None else "final"
     dest = output_dir / "checkpoints" / setup / suffix
@@ -305,8 +318,10 @@ def train_sft(
     trainable_params = sum(param.numel() for param in trainable)
     trainable_dtypes = {str(dtype): sum(p.numel() for p in trainable if p.dtype == dtype)
                         for dtype in {p.dtype for p in trainable}}
+    # PEFT reports logical counts for packed Params4bit; this raw count is the
+    # exact number of elements passed to AdamW and can therefore differ.
     model.print_trainable_parameters()
-    print(f"{setup}: LoRA target modules={len(targets)}, trainable params={trainable_params:,}")
+    print(f"{setup}: LoRA target modules={len(targets)}, optimizer raw params={trainable_params:,}")
     print(f"{setup}: trainable parameter dtypes={trainable_dtypes}")
 
     dataset = RoadDamageDataset(train_rows, image_root)
@@ -352,6 +367,12 @@ def train_sft(
             scaler.scale(loss / grad_accum).backward()
             micro_step += 1
             if micro_step % grad_accum == 0:
+                promoted = _promote_fp16_optimizer_grads(model, optimizer)
+                if promoted and step == 0:
+                    print(
+                        f"{setup}: converted {len(promoted)} FP16 optimizer gradients to FP32 "
+                        f"before unscale; examples={promoted[:5]}"
+                    )
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(trainable, 1.0)
                 scaler.step(optimizer)
